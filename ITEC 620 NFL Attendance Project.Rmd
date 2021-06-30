@@ -1,0 +1,1297 @@
+---
+title: "An Analysis of NFL Attendance Trends, 2000-2019"
+output:
+  html_notebook: default
+  word_document: default
+---
+
+The following chunk contains all of the packages activated for conduct of this research project
+```{r}
+library(tidyverse)
+library(tidyr)
+library(ggpubr)
+library(DataExplorer)
+library(ggthemes)
+library(scales)
+library(cowplot)
+library(xlsx)
+library(gridExtra)
+library(arules)
+library(cluster)
+library(DMwR)
+library(class)
+library(forecast)
+library(caTools)
+library(tree)
+library(forcats)
+library(factoextra)
+library(FNN)
+library(ggdendro)
+library(corrplot)
+library(zoo)
+```
+
+***
+#Download original datasets from GitHub
+The following chunk is the import of the datasets from the TidyTuesday GitHub site (https://github.com/rfordatascience/tidytuesday). The specific website the links come from is https://github.com/rfordatascience/tidytuesday/blob/master/data/2020/2020-02-04/readme.md. The data originates from Pro Football Reference (https://www.pro-football-reference.com/)
+```{r}
+attendance <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-02-04/attendance.csv')
+standings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-02-04/standings.csv')
+games <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-02-04/games.csv')
+```
+
+# Upload cleaned datasets back in R
+The three datasets were downloaded for further inspection. Upon inspection, the team modified the datasets to enhance ease of use for analysis. The cleaned datasets were then imported into the R environment in the following chunk
+```{r}
+library(readr)
+attendance_clean <- read_csv("attendance_clean.csv")
+View(attendance_clean)
+
+library(readr)
+games_clean <- read_csv("games_clean.csv")
+View(games_clean)
+
+library(readr)
+standings_clean <- read_csv("standings_clean.csv")
+View(standings_clean)
+
+library(readr)
+division_attendance_clean <- read_csv("division_attendance_clean.csv")
+View(division_attendance_clean)
+```
+
+# Further clean datasets
+The following chunk contains code that further cleans the standings_clean.
+```{r}
+standings_clean <- standings_clean %>%
+  mutate(pct_filled = 100 * true_total_home_attendance / true_home_capacity) %>%
+  relocate(division, .after = team_name)
+standings_clean
+
+standings_trimmed <- standings_clean %>%
+  mutate(division = as.factor(division),
+         team_name = as.factor(team_name)) %>%
+    select(season,
+         team_name,
+         division,
+         home_wins,
+         home_losses,
+         home_ties,
+         away_wins,
+         away_losses,
+         away_ties,
+         neutral_site_win,
+         neutral_site_losses,
+         neutral_site_ties,
+         season_win_pct,
+         home_season_win_pct,
+         away_season_win_pct,
+         neutral_site_season_win_pct,
+         true_total_home_attendance,
+         true_home_capacity,
+         pct_filled,
+         simple_rating,
+         playoffs,
+         sb_winner) %>%
+  arrange(season,team_name)
+standings_trimmed
+```
+
+The following chunk breaks the attendance_clean dataset into multiple datasets.
+```{r}
+bye_week_history <- attendance_clean %>%
+  filter(bye_week_binary == 1) %>%
+  select(-bye_week_binary)
+bye_week_history
+
+attendance_trimmed <- attendance_clean %>%
+  filter(bye_week_binary == 0) %>%
+  select(-bye_week_binary) %>% 
+  relocate(division, .after = team_name)
+attendance_trimmed
+
+neutral_site_history <- attendance_trimmed %>%
+  filter(neutral_site_binary == 1) %>%
+  select(-neutral_site_binary)
+neutral_site_history
+
+attendance_trimmed <- attendance_trimmed %>%
+  filter(neutral_site_binary == 0) %>%
+  select(-neutral_site_binary)
+attendance_trimmed
+```
+
+
+
+The following chunk contains code that futher cleans the games_clean dataset
+```{r}
+games_trimmed <- games_clean %>%
+  select(-home_team_name,
+         -home_team_city,
+         -away_team_name,
+         -away_team_city,
+         -date)
+games_trimmed
+```
+
+The following chunk contains code that further cleans the division_attendance_clean dataset
+```{r}
+division_attendance_trimmed <- division_attendance_clean %>%
+  filter(bye_week_binary == 0,
+         neutral_site_binary == 0) %>%
+  select(-bye_week_binary,
+         -neutral_site_binary) %>%
+  mutate(team_name = as.factor(team_name))
+division_attendance_trimmed
+
+```
+
+
+***
+# Initial, high-level analysis of datasets to determine if there are potential correlation within the datasets
+
+Perform initial data exploration of the standings_trimmed table using the DataExplorer package's plot_correlation. Based on the data contained in the standings_trimmed dataset there is moderate positive linear correlation between pct_filled and playoffs, 0.23.    pct_filled also has a moderate positive linear correlation with a team's overall winning percentage, home winning percentage and away winning percentage; 0.29, 0.25 and 0.25 respectively. Interestingly, the NFC East has a weak positive linear correlation with pct_filled (0.09) and away game winning percentage (0.07) over the time period under consideration, seasons 2000-2019.
+```{r}
+plot_correlation(standings_trimmed)
+
+```
+
+Perform initial data exploration of the attendance_clean table using the DataExplorer package's plot_correlation.
+```{r}
+plot_correlation(attendance_trimmed)
+```
+
+Perform initial data exploration of the games_trimmed table using the DataExplorer package's plot_correlation.
+```{r}
+plot_correlation(games_trimmed)
+```
+
+Perform relationship exploration between divisions and attendance and other related game metrics
+```{r}
+plot_correlation(division_attendance_trimmed)
+```
+
+
+
+***
+# What has NFL Attendance done between 2000 and 2019?
+
+## An exploration into the seasonal NFL attendance data
+
+The 2000 and 2001 seasons featured only 31 teams. In 2002, the Houston Texans joined the NFL, which caused divisional realignment for each conference. The NFL has not added any more teams since 2002, but there have been teams that have moved cities (Chargers from San Diego to Los Angeles and the Rams from St. Louis to Los Angeles). During the timeframe of study, the NFL began hosting regular season games in international locations - the United Kingdom and Mexico.  For purposes of this research analysis, we are excluding those game's data points from the analysis. The fans that are attending those games are more likely to attend the game out of a sense of novelty and experience, which may be different motivations from the standard fan of a team in America.
+
+Below is the table showing by season, the total attendance for games played in America. Also shown is the percent change from one year to the next.
+```{r}
+standings_clean %>%
+  group_by(season) %>%
+  summarize(total_attendance = sum(true_total_home_attendance),
+            total_available_capacity = sum(true_home_capacity),
+            attendance_to_capacity_delta = sum(true_home_capacity) - sum(true_total_home_attendance)) %>%
+  mutate(pct_change_annual_attendance = 100 * (total_attendance/lag(total_attendance) - 1)) %>%
+  mutate(pct_change_annual_stadium_capacity = 100 *(total_available_capacity/lag(total_available_capacity) -1))  %>%
+  select(season, total_attendance, pct_change_annual_attendance, total_available_capacity, pct_change_annual_stadium_capacity, attendance_to_capacity_delta)
+
+write.xlsx(standings_clean, file = "write_standings_clean.xlsx")
+```
+
+Chart showing how total attendance in America and total stadium capacity in America have tracked over time
+```{r}
+total_attendance_capacity_by_season <- standings_clean %>%
+  group_by(season) %>%
+  summarize(total_attendance = sum(true_total_home_attendance),
+            total_available_capacity = sum(true_home_capacity)) %>%
+  mutate(pct_change_annual_attendance = 100 * (total_attendance/lag(total_attendance) - 1)) %>%
+  mutate(pct_change_annual_stadium_capacity = 100 *(total_available_capacity/lag(total_available_capacity) -1))  %>%
+  select(season, total_attendance, pct_change_annual_attendance, total_available_capacity, pct_change_annual_stadium_capacity) 
+total_attendance_capacity_by_season
+
+write.xlsx(total_attendance_capacity_by_season, file = "total_attendance_by_season.xlsx")
+
+plot_nfl_total_attendance_and_capacity_by_season <- ggplot(total_attendance_capacity_by_season,aes(season)) +
+  geom_line(aes(y = total_attendance), color = "darkred", size = 2) +
+  geom_line(aes(y = total_available_capacity), color = "steelblue", size = 2) +
+  labs(title = "NFL Total Attendance and NFL Total Stadium Capacity by Season, 2000-2019",
+       subtitle = "Games Played in America, Total Stadium Capacity (blue), Total Attendance (red)",
+       x = "NFL Season",
+       y = "Qty") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_total_attendance_and_capacity_by_season
+
+save_plot("plot_nfl_total_attendance_and_capacity_by_season.png", plot_nfl_total_attendance_and_capacity_by_season)
+```
+
+
+
+
+Below is the chart showing how raw NFL attendance figures for games played in America has changed over time
+```{r}
+total_nfl_season_attendance <- standings_clean %>%
+  group_by(season) %>%
+  summarize(total_attendance = sum(true_total_home_attendance)) 
+total_nfl_season_attendance
+
+write.xlsx(total_nfl_season_attendance, file = "total_nfl_season_attendance.xlsx")
+
+plot_nfl_total_attendance_by_season <- ggplot(total_nfl_season_attendance, aes(season, total_attendance)) +
+  geom_line(size = 2) +
+  labs(title = "NFL Total Attendance, 2000-2019",
+       subtitle = "Games Played in America",
+       x = "NFL Season",
+       y = "Total Attendance") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_total_attendance_by_season
+
+save_plot("plot_nfl_total_attendance_by_season.png", plot_nfl_total_attendance_by_season)
+```
+
+How has attendance/game trended over the 2000-2019 seasons (tabular form)
+```{r}
+season_per_game_attendance_avg <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarise(avg_game_attendance = mean(weekly_attendance[home_game_binary == 1]),
+            avg_stadium_capacity = mean(stadium_capacity[home_game_binary ==1]),
+            avg_game_stadium_fill_rate = 100 *(sum(weekly_attendance[home_game_binary == 1]) / (sum(stadium_capacity[home_game_binary == 1]))))
+season_per_game_attendance_avg
+
+write.xlsx(season_per_game_attendance_avg, file = "season_per_game_attendance_avg.xlsx")
+```
+
+How has attendance/game trended over the 2000-2019 seasons (graph)
+```{r}
+season_per_game_attendance_capacity_avg <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarise(avg_game_attendance = mean(weekly_attendance[home_game_binary == 1]),
+            avg_stadium_capacity = mean(stadium_capacity[home_game_binary ==1]),
+            avg_game_stadium_fill_rate = 100 *(sum(weekly_attendance[home_game_binary == 1]) / (sum(stadium_capacity[home_game_binary == 1]))))
+season_per_game_attendance_capacity_avg
+
+write.xlsx(season_per_game_attendance_capacity_avg, file = "season_per_game_attendance_capacity_avg.xlsx")
+
+plot_nfl_avg_attendance_capacity_by_season <- ggplot(season_per_game_attendance_capacity_avg, aes(season)) +
+  geom_line(aes(y = avg_game_attendance), color = "darkred", size = 2) +
+  geom_line(aes(y = avg_stadium_capacity), color = "steelblue", size = 2) +
+  labs(title = "NFL Average Game Attendance and Average Stadium Capacity by Season, 2000-2019",
+       subtitle = "Games Played in America, Average Game Attendance (red), Average Stadium Capacity (blue)",
+       x = "NFL Season",
+       y = "Quantity") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_total_attendance_and_capacity_by_season
+
+save_plot("plot_nfl_total_attendance_and_capacity_by_season.png", plot_nfl_total_attendance_and_capacity_by_season)
+```
+
+
+
+
+Below is the chart showing the total percent filled of all NFL Stadiums for each season. Only games played in America are included
+```{r}
+nfl_seasonal_stadium_fill_rate <- standings_clean %>%
+  group_by(season) %>%
+  summarize(percent_filled = 100 * (sum(true_total_home_attendance) / sum(true_home_capacity))) 
+nfl_seasonal_stadium_fill_rate
+
+write.xlsx(nfl_seasonal_stadium_fill_rate, file = "nfl_seasonal_stadium_fill_rate.xlsx")
+
+plot_nfl_stadium_fill_rate_by_season <- ggplot(nfl_seasonal_stadium_fill_rate, aes(season, percent_filled)) +
+  geom_line(size = 2) +
+   labs(title = "NFL Total Seasonal Stadium Fill Rate, 2000-2019",
+       subtitle = "Games Played in America",
+       x = "NFL Season",
+       y = "Percent Filled") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_stadium_fill_rate_by_season
+
+save_plot("plot_nfl_stadium_fill_rate_by_season.png", plot_nfl_stadium_fill_rate_by_season)
+```
+
+Overall NFL Season Win Pct vs Overall NFL Stadium Fill Pct
+```{r}
+nfl_season_win_pct_fill_rate <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarize(overall_nfl_win_pct = 100 * (sum(game_win) + (0.5 * sum(game_tie)))/sum(game_win, game_loss, game_tie),
+            overall_nfl_stadium_fill_pct = 100 * (sum(weekly_attendance) / sum(stadium_capacity)))
+nfl_season_win_pct_fill_rate
+
+write.xlsx(nfl_season_win_pct_fill_rate, file = "nfl_season_win_pct_fill_rate.xlsx")
+
+plot_nfl_win_pct_fill_rate_by_season <- ggplot(nfl_season_win_pct_fill_rate, aes(season)) +
+  geom_line(aes(y = overall_nfl_win_pct), color = "darkred", size = 2) +
+  geom_line(aes(y = overall_nfl_stadium_fill_pct), color = "steelblue", size = 2) +
+  labs(title = "NFL Season Winning Percentage and Total Seasonal Stadium Fill Rate, 2000-2019",
+       subtitle = "Games Played in America, NFL Season Winning Pct (red), NFL Stadium Fill Rate (blue)",
+       x = "NFL Season",
+       y = "Percent") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_win_pct_fill_rate_by_season
+
+save_plot("plot_nfl_win_pct_fill_rate_by_season.png", plot_nfl_win_pct_fill_rate_by_season)
+```
+
+Graph depicting the distribution of games played in America, games played at neutral sites (The United Kingdom and Mexico), and the number of teams on a bye week for a given week.
+```{r}
+
+by_week_game_distribution <- attendance_clean %>%
+  group_by(week) %>%
+  summarize(us_game_avg_qty = (sum(home_game_binary == 1)/20),
+            intl_game_avg_qty = (sum(neutral_site_binary == 1)/20),
+            bye_week_game_avg_qty = 16 - (us_game_avg_qty + intl_game_avg_qty)) %>%
+  pivot_longer(cols = us_game_avg_qty:bye_week_game_avg_qty,
+               names_to = "game_type",
+               values_to = "quantity") 
+by_week_game_distribution
+
+
+plot_nfl_game_distribution_by_week <- ggplot(by_week_game_distribution, aes(week, quantity, fill = game_type)) +
+  geom_col() +
+  scale_y_continuous(label = comma) +
+  labs(title = "Distribution of Games (US and International) and Bye Weeks (as games), 2000-2019",
+       x = "Week",
+       y = "Quantity") +
+  theme_cowplot() +
+  scale_fill_hue()
+plot_nfl_game_distribution_by_week
+
+save_plot("plot_nfl_game_distribution_by_week.png", plot_nfl_game_distribution_by_week)
+
+write.xlsx(by_week_game_distribution, file = "by_week_game_distribution.xlsx")
+
+```
+
+Table showing overall NFL winning percentage and Divisional Winning Percentage by season. Some divisions performed better and worse relative to the NFL average winning percentage.
+```{r}
+nfl_division_winning_percentage_regular <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarize(NFL = 100 * (sum(game_win) + (0.5 * sum(game_tie)))/sum(game_win, game_loss, game_tie),
+            NFC_East = 100 * (sum(game_win[division == 'NFC East']) + (0.5 * sum(game_tie[division == 'NFC East'])))/sum(game_win[division == 'NFC East'], game_loss[division == 'NFC East'], game_tie[division == 'NFC East']),
+            NFC_Central = 100 * (sum(game_win[division == 'NFC Central']) + (0.5 * sum(game_tie[division == 'NFC Central'])))/sum(game_win[division == 'NFC Central'], game_loss[division == 'NFC Central'], game_tie[division == 'NFC Central']),
+            NFC_North = 100 * (sum(game_win[division == 'NFC North']) + (0.5 * sum(game_tie[division == 'NFC North'])))/sum(game_win[division == 'NFC North'], game_loss[division == 'NFC North'], game_tie[division == 'NFC North']),
+            NFC_South = 100 * (sum(game_win[division == 'NFC South']) + (0.5 * sum(game_tie[division == 'NFC South'])))/sum(game_win[division == 'NFC South'], game_loss[division == 'NFC South'], game_tie[division == 'NFC South']),
+            NFC_West = 100 * (sum(game_win[division == 'NFC West']) + (0.5 * sum(game_tie[division == 'NFC West'])))/sum(game_win[division == 'NFC West'], game_loss[division == 'NFC West'], game_tie[division == 'NFC West']),
+            AFC_East = 100 * (sum(game_win[division == 'AFC East']) + (0.5 * sum(game_tie[division == 'AFC East'])))/sum(game_win[division == 'AFC East'], game_loss[division == 'AFC East'], game_tie[division == 'AFC East']),
+            AFC_Central = 100 * (sum(game_win[division == 'AFC Central']) + (0.5 * sum(game_tie[division == 'AFC Central'])))/sum(game_win[division == 'AFC Central'], game_loss[division == 'AFC Central'], game_tie[division == 'AFC Central']),
+            AFC_North = 100 * (sum(game_win[division == 'AFC North']) + (0.5 * sum(game_tie[division == 'AFC North'])))/sum(game_win[division == 'AFC North'], game_loss[division == 'AFC North'], game_tie[division == 'AFC North']),
+            AFC_South = 100 * (sum(game_win[division == 'AFC South']) + (0.5 * sum(game_tie[division == 'AFC South'])))/sum(game_win[division == 'AFC South'], game_loss[division == 'AFC South'], game_tie[division == 'AFC South']),
+            AFC_West = 100 * (sum(game_win[division == 'AFC West']) + (0.5 * sum(game_tie[division == 'AFC West'])))/sum(game_win[division == 'AFC West'], game_loss[division == 'AFC West'], game_tie[division == 'AFC West']))
+nfl_division_winning_percentage_regular
+
+nfl_division_winning_percentage_pivoted <- nfl_division_winning_percentage_regular %>%
+  pivot_longer(cols = NFC_East:AFC_West,
+               names_to = "division", "win_pct",
+               values_to = "season_win_pct")
+nfl_division_winning_percentage_pivoted
+
+nfl_winning_percentage <- nfl_division_winning_percentage_regular %>%
+  pull(NFL)
+nfl_winning_percentage
+nfl_division_winning_percentage_regular <- nfl_division_winning_percentage_regular %>%
+  select(-NFL)
+nfl_division_winning_percentage_regular
+nfl_division_winning_percentage_pivoted
+
+write.xlsx(nfl_division_stadium_fill_rate_regular, file = "nfl_division_stadium_fill_rate_regular.xlsx")
+write.xlsx(nfl_division_stadium_fill_rate_pivoted, file = "nfl_division_stadium_fill_rate_pivoted.xlsx")
+
+
+nfl_winning_percentage <- as.tibble(nfl_winning_percentage)
+nfl_winning_percentage
+nfl_winning_percentage <- nfl_winning_percentage %>%
+  mutate(season = seasons) %>%
+  rename(season_win_pct = value) %>%
+  relocate(season, .before = season_win_pct)
+nfl_winning_percentage
+
+write.xlsx(nfl_winning_percentage, file = "nfl_winning_percentage.xlsx")
+
+```
+
+Graph depicting Average Overall NFL Season Winning Percentage and Average Overall Division Winning Percentage
+```{r}
+plot_nfl_divisional_win_pct_by_season <- ggplot(nfl_division_winning_percentage_pivoted, aes(season, season_win_pct, col = division)) +
+  geom_line(size = 2) +
+  geom_point(size = 2.1) +
+  facet_wrap(~division, nrow = 2) +
+  geom_line(data = nfl_winning_percentage, aes(season, season_win_pct), color = 'black', size = 1.2) +
+  labs(title = "NFL and Divisional Seasonal Win Percentages, 2000-2019",
+       subtitle = "Games Played in America, NFL Seasonal Win % (black)",
+       x = "NFL Season",
+       y = "Season Win Percentage") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_divisional_win_pct_by_season
+
+save_plot("plot_nfl_divisional_win_pct_by_season.png", plot_nfl_divisional_win_pct_by_season)
+
+```
+
+
+
+Table showing Average Overall NFL Stadium Fill Percentage and Overall Division Stadium Fill Percentages.
+```{r}
+nfl_division_stadium_fill_rate_regular <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarize(NFL = 100 * (sum(weekly_attendance) / sum(stadium_capacity)),
+            NFC_East = 100 * (sum(weekly_attendance[division == 'NFC East']) / sum(stadium_capacity[division == 'NFC East'])),
+            NFC_Central = 100 * (sum(weekly_attendance[division == 'NFC Central']) / sum(stadium_capacity[division == 'NFC Central'])),
+            NFC_North = 100 * (sum(weekly_attendance[division == 'NFC North']) / sum(stadium_capacity[division == 'NFC North'])),
+            NFC_South = 100 * (sum(weekly_attendance[division == 'NFC South']) / sum(stadium_capacity[division == 'NFC South'])),
+            NFC_West = 100 * (sum(weekly_attendance[division == 'NFC West']) / sum(stadium_capacity[division == 'NFC West'])),
+            AFC_East = 100 * (sum(weekly_attendance[division == 'AFC East']) / sum(stadium_capacity[division == 'AFC East'])),
+            AFC_Central = 100 * (sum(weekly_attendance[division == 'AFC Central']) / sum(stadium_capacity[division == 'AFC Central'])),
+            AFC_North = 100 * (sum(weekly_attendance[division == 'AFC North']) / sum(stadium_capacity[division == 'AFC North'])),
+            AFC_South = 100 * (sum(weekly_attendance[division == 'AFC South']) / sum(stadium_capacity[division == 'AFC South'])),
+            AFC_West = 100 * (sum(weekly_attendance[division == 'AFC West']) / sum(stadium_capacity[division == 'AFC West']))) 
+nfl_division_stadium_fill_rate_regular
+
+nfl_division_stadium_fill_rate_pivoted <- nfl_division_stadium_fill_rate_regular %>%
+  pivot_longer(cols = NFC_East:AFC_West,
+               names_to = "division", "fill_rate",
+               values_to = "stadium_fill_rate")
+nfl_division_stadium_fill_rate_pivoted
+
+# extract NFL stadium fill rates as a vector and then remove variable from nfl_division_stadium_fill_rate_regular
+nfl_stadium_fill_rate <- nfl_division_stadium_fill_rate_regular %>%
+  pull(NFL)
+nfl_stadium_fill_rate
+nfl_division_stadium_fill_rate_regular <- nfl_division_stadium_fill_rate_regular %>%
+  select(-NFL)
+nfl_division_stadium_fill_rate_regular
+nfl_division_stadium_fill_rate_pivoted
+
+write.xlsx(nfl_division_stadium_fill_rate_regular, file = "nfl_division_stadium_fill_rate_regular.xlsx")
+write.xlsx(nfl_division_stadium_fill_rate_pivoted, file = "nfl_division_stadium_fill_rate_pivoted.xlsx")
+
+
+# convert NFL stadium fill rates to a tibble and rename // establish seasons vector // mutate the seasons vector to the NFL stadiums fill rate tibble
+nfl_stadium_fill_rate <- as_tibble(nfl_stadium_fill_rate)
+nfl_stadium_fill_rate
+seasons <- c(2000:2019)
+nfl_stadium_fill_rate <- nfl_stadium_fill_rate %>%
+  mutate(season = seasons) %>%
+  rename(pct_filled = value) %>%
+  relocate(season, .before = pct_filled)
+nfl_stadium_fill_rate
+
+write.xlsx(nfl_stadium_fill_rate, file = "nfl_stadium_fill_rate.xlsx")
+
+
+```
+
+
+Graph depicting Average Overall NFL Stadium FIll Rate and Overall Division Stadium Fill Percentages.
+```{r}
+plot_nfl_divisional_stadium_fill_rates_by_season <- ggplot(nfl_division_stadium_fill_rate_pivoted, aes(season, stadium_fill_rate, col = division)) +
+  geom_line(size = 2) +
+  geom_point(size = 2.1) +
+  facet_wrap(~division, nrow = 2) +
+  geom_line(data = nfl_stadium_fill_rate, aes(season, pct_filled), color = 'black', size =1.2) +
+  labs(title = "NFL and Divisional Stadium Fill Rates, 2000-2019",
+       subtitle = "Games Played in America, NFL Seasonal Fill % (black)",
+       x = "NFL Season",
+       y = "Percent Filled") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_nfl_divisional_stadium_fill_rates_by_season
+
+save_plot("plot_nfl_divisional_stadium_fill_rates_by_season.png", plot_nfl_divisional_stadium_fill_rates_by_season)
+```
+
+
+Analysis by year of each division's number wins, losses and ties. Also included is the division winning percentage and stadium fill rate.
+```{r}
+by_season_by_division_totals <- attendance_trimmed %>%
+  group_by(season, division) %>%
+  summarize(total_wins = sum(game_win),
+            total_losses = sum(game_loss),
+            total_ties = sum(game_tie),
+            winning_pct = 100 * (total_wins + 0.5 * total_ties) / (total_wins + total_losses + total_ties),
+            total_true_home_attendance = sum(weekly_attendance[home_game_binary == 1]),
+            division_stadium_pct_fill_rate = 100 * (sum(weekly_attendance) / sum(stadium_capacity)),
+            total_home_points_scored = sum(points_scored[home_game_binary == 1]),
+            total_home_yards_gained = sum(yards_gained[home_game_binary == 1]),
+            total_home_turnover_lost = sum(turnovers_lost[home_game_binary == 1])) %>%
+  ungroup()
+by_season_by_division_totals
+
+write.xlsx(by_season_by_division_totals, file = "by_season_by_division_totals.xlsx")
+```
+
+
+By Division, by season win percentage, attendance, capacity, and fill rate
+```{r}
+standings_clean %>%
+  group_by(division, season) %>%
+  arrange(season) %>%
+  summarize(division_win_percent = 100 * ((sum(home_wins,away_wins) + (0.5 * sum(home_ties, away_ties))) / sum(home_wins, home_losses, home_ties, away_wins, away_losses, away_ties)),
+            division_attendance = sum(true_total_home_attendance),
+            division_stadium_capacity = sum(true_home_capacity),
+            division_stadium_fill_rate = 100 * (sum(true_total_home_attendance)/sum(true_home_capacity)),
+            overall_nfl_win_pct = 100 * (((sum(home_wins, away_wins) + (0.5 * sum(home_ties, away_ties)))/sum(home_wins, home_losses, home_ties, away_wins, away_losses, away_ties))),
+            overall_nfl_stadium_fill_rate = 100 * (sum(true_total_home_attendance)/sum(true_home_capacity)))
+```
+
+
+
+
+
+```{r}
+seasonal_division_win_pct <- attendance_trimmed %>%
+  group_by(season, division) %>%
+  summarize(win_pct = 100 * ((sum(game_win) + (0.5 * sum(game_tie))) / sum(game_win, game_loss, game_tie)))
+seasonal_division_win_pct
+
+seasonal_team_win_pct <- attendance_trimmed %>%
+  select(season, team_name, division, game_win, game_loss, game_tie) %>%
+  group_by(season, team_name) %>%
+  summarize(win_pct = 100 * ((sum(game_win) + (0.5 * sum(game_tie))) / sum(game_win, game_loss, game_tie)),
+            division = division) %>%
+  relocate(division, .before = win_pct) %>%
+  distinct()
+seasonal_team_win_pct
+
+#team_division_seasonal_win_pct <- 
+#left_join(seasonal_team_win_pct,seasonal_division_win_pct, by = c('season', 'division'))
+rbind()
+```
+
+```{r}
+
+  
+plot_divisional_team_win_pct_by_season <- ggplot(seasonal_team_win_pct, aes(season, win_pct, col = team_name)) +
+  geom_line() +
+  facet_wrap(~division, nrow = 2) +
+  geom_line(data = seasonal_division_win_pct, aes(season, win_pct), color = 'black', size = 1.2) +
+  labs(title = "Divisional and Team Seasonal Winning Percentages, 2000-2019",
+       subtitle = "Games Played in America, Division Seasonal Win % (black)",
+       x = "NFL Season",
+       y = "Win Percentage") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_divisional_team_win_pct_by_season
+
+save_plot("plot_divisional_team_win_pct_by_season.png", plot_divisional_team_win_pct_by_season)
+  
+```
+
+
+
+
+
+
+Week to week analysis of the distribution of games. Included are the number of games played in America, the number of games played at neutral sites (The United Kingdom and Mexico), and the number of teams on a bye week for a given week.
+```{r}
+attendance_clean %>%
+  group_by(week) %>%
+  summarize(qty_true_home_games_played = sum(home_game_binary[home_game_binary == 1]),
+            qty_neutral_site_games_played = sum(neutral_site_binary[neutral_site_binary == 1]),
+            qty_teams_on_bye_weeks = sum(bye_week_binary[bye_week_binary ==1]),
+            total_true_attendance = sum(weekly_attendance[home_game_binary == 1]),
+            total_points_scored = sum(points_scored[home_game_binary == 1]),
+            total_yards_gained = sum(yards_gained[home_game_binary == 1]),
+            total_turnovers_lost = sum(turnovers_lost[home_game_binary == 1]))
+```
+
+
+
+Team by team by season depicting stadium fill rate over time.
+```{r}
+plot_team_stadium_fill_rate_by_season <- standings_trimmed %>%
+  group_by(team_name) %>%
+  ggplot(aes(season, pct_filled)) +
+  geom_line(size = 2) +
+  facet_wrap(~team_name) +
+  labs(title = "By Team Stadium Fill Rate by Season, 2000-2019",
+       subtitle = "Games Played in America",
+       x = "NFL Season",
+       y = "Percent") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_team_stadium_fill_rate_by_season
+
+save_plot("plot_team_stadium_fill_rate_by_season.png", plot_team_stadium_fill_rate_by_season)
+```
+
+Graph incorporating each season's winning percentage and home schedule winning percentage to see if the lines for the seasons move together and if there is a visual linkage to the stadium fill rate.
+```{r}
+plot_team_fill_rate_season_win_pct_home_win_pct_by_season <- standings_trimmed %>%
+  group_by(team_name) %>%
+  ggplot(aes(season)) +
+  geom_line(aes(y = pct_filled), color = "black", size = 2) +
+  geom_line(aes(y = 100 * season_win_pct), color = "darkred", size = 2) +
+  geom_line(aes(y = 100 * home_season_win_pct),color = "steelblue", size = 2) +
+  facet_wrap(~team_name) +
+  labs(title = "Individual Team Trends, 2000-2019",
+       subtitle = "Games Played in America, Stadium Fill Rate (black), Season Winning Percentage (red), Season Home Winning Percentage (blue)",
+       x = "NFL Season",
+       y = "Percent") +
+  scale_y_continuous(label = comma) +
+  theme_cowplot()
+plot_team_fill_rate_season_win_pct_home_win_pct_by_season
+
+save_plot("plot_team_fill_rate_season_win_pct_home_win_pct_by_season.png", plot_team_fill_rate_season_win_pct_home_win_pct_by_season)
+```
+
+
+***
+# Perform Clustering Analysis of datasets
+## K-means clustering
+
+
+Perform K-Means clustering on the attendance_trimmed dataset. The goal is to see how the data clusters regarding the various variables in the table 
+
+
+```{r}
+
+attendance_trimmed_clustering_set <- division_attendance_trimmed %>%
+  group_by(team_name, season) %>%
+  summarize(nfc_east = ifelse(sum(`NFC East`) == 16, 1, 0),
+            nfc_central = ifelse(sum(`NFC Central`) == 16, 1, 0),
+            nfc_north = ifelse(sum(`NFC North`) == 16, 1, 0),
+            nfc_south = ifelse(sum(`NFC South`) == 16, 1, 0),
+            nfc_west = ifelse(sum(`NFC West`) == 16, 1, 0),
+            afc_east = ifelse(sum(`AFC East`) == 16, 1, 0),
+            afc_central = ifelse(sum(`AFC Central`) == 16, 1, 0),
+            afc_north = ifelse(sum(`AFC North`) == 16, 1, 0),
+            afc_south = ifelse(sum(`AFC South`) == 16, 1, 0),
+            afc_west = ifelse(sum(`AFC West`) == 16, 1, 0),
+            total_home_attendance = sum(weekly_attendance[home_game_binary ==1]),
+            total_home_points_scored = sum(points_scored[home_game_binary ==1]),
+            total_home_yards_gained = sum(yards_gained[home_game_binary ==1]),
+            total_turnovers_lost = sum(turnovers_lost[home_game_binary ==1])) %>%
+  mutate(id = paste(team_name, season, sep = "_")) %>%
+  relocate(id, .before = team_name) %>%
+  ungroup() %>%
+  select(-team_name, -season) %>%
+  remove_rownames() %>%
+  column_to_rownames(var = "id")
+attendance_trimmed_clustering_set
+
+
+
+
+attendance_trimmed_clustering_set.norm <- scale(attendance_trimmed_clustering_set)
+set.seed(12345)
+attendance_trimmed_clustering_set.kmclusters <- kmeans(attendance_trimmed_clustering_set.norm, 3, nstart=30)
+attendance_trimmed_clustering_set.kmclusters$centers
+unscale(attendance_trimmed_clustering_set.kmclusters$centers, attendance_trimmed_clustering_set.norm)
+attendance_trimmed_clustering_set.kmclusters$size
+attendance_cluster_plot <- fviz_cluster(attendance_trimmed_clustering_set.kmclusters, data = attendance_trimmed_clustering_set, labelsize = 0)
+attendance_cluster_plot
+
+png(filename = "attendance_cluster_plot.png")
+plot(attendance_cluster_plot)
+dev.off()
+
+
+set.seed(12345)
+attendance_gaps <- clusGap(attendance_trimmed_clustering_set.norm, kmeans, 20, d.power=2)
+maxSE(attendance_gaps$Tab[,"gap"],attendance_gaps$Tab[,"SE.sim"],"Tibs2001SEmax")
+attendance_cluster_gaps_plot <- plot(attendance_gaps$Tab[,"gap"])
+# figure out why it isn't saving in the object
+attendance_cluster_gaps_plot
+
+png(filename = "attendance_cluster_gaps_plot.png")
+plot(attendance_cluster_gaps_plot)
+dev.off()
+
+attendance_trimmed_cluster_set.distances <- dist(attendance_trimmed_clustering_set.norm, method="euclidean")
+attendance_trimmed_cluster_set.hclusters <- hclust(attendance_trimmed_cluster_set.distances, method="centroid")
+attendance_dendrogram <- ggdendrogram(attendance_trimmed_cluster_set.hclusters, labels=FALSE)
+attendance_dendrogram
+
+png(filename = "attendance_dendrogram.png")
+plot(attendance_dendrogram)
+dev.off()
+
+```
+
+
+
+
+
+***
+# Cluster Analysis of Standings data
+
+```{r}
+standings_trimmed_cluster_set <- standings_trimmed %>%
+  mutate(id = paste(season, team_name, sep = "_")) %>%
+  relocate(id, before = season) %>%
+  select(-team_name, -division) %>%
+  remove_rownames() %>%
+  column_to_rownames(var = "id")
+standings_trimmed_cluster_set
+
+standings.norm <- scale(standings_trimmed_cluster_set)
+
+set.seed(12345)
+standings.kmclusters <- kmeans(standings.norm, 3, nstart=30)
+standings.kmclusters$centers
+unscale(standings.kmclusters$centers, standings.norm)
+standings.kmclusters$size
+standings_cluster_plot <- fviz_cluster(standings.kmclusters, data = standings_trimmed_cluster_set, labelsize = 0)
+standings_cluster_plot
+
+png(filename = "standings_cluster_plot.png")
+plot(standings_cluster_plot)
+dev.off()
+
+set.seed(12345)
+standings_gaps <- clusGap(standings.norm, kmeans, 20, d.power=2)
+maxSE(standings_gaps$Tab[,"gap"],standings_gaps$Tab[,"SE.sim"],"Tibs2001SEmax")
+standings_cluster_gaps_plot <- plot(standings_gaps$Tab[,"gap"])
+standings_cluster_gaps_plot
+
+png(filename = "standings_cluster_gaps_plot.png")
+plot(standings_cluster_gaps_plot)
+dev.off()
+
+
+standings_trimmed_cluster_set.distances <- dist(standings.norm, method="euclidean")
+standings.hclusters <- hclust(standings_trimmed_cluster_set.distances, method="centroid")
+standings_dendrogram <- ggdendrogram(standings.hclusters, labels=FALSE)
+standings_dendrogram
+
+png(filename = "standings_dendrogram.png")
+plot(standings_dendrogram)
+dev.off()
+
+
+```
+
+
+
+
+***
+# Predictive Analytics Analysis
+## Moving Average Analysis
+
+Attendance_trimmed moving average analysis
+```{r}
+attendance_trimmed %>%
+  select(season, week, weekly_attendance, stadium_capacity) %>%
+  group_by(season, week) %>%
+  summarize(total_weekly_attendance = sum(weekly_attendance),
+            total_weekly_stadium_capacity = sum(stadium_capacity)) %>%
+  mutate(attendance_ma = rollmean(total_weekly_attendance, k = 2, align = "right", fill = NA))
+
+```
+
+
+
+
+***
+# Exponential Smoothing Analysis of weekly NFL-level attenance data
+
+## Single Exponential Smoothing of total weekly attendance time series data
+```{r}
+total_weekly_attendance <- attendance_trimmed %>%
+  select(season, week, weekly_attendance, stadium_capacity) %>%
+  group_by(season, week) %>%
+  summarize(total_weekly_attendance = sum(weekly_attendance))
+total_weekly_attendance
+
+total_weekly_attendance_ts <- ts(total_weekly_attendance$total_weekly_attendance, start = 2000, frequency = 17)
+total_weekly_attendance_ts_components <- decompose(total_weekly_attendance_ts)
+plot(total_weekly_attendance_ts)
+plot(total_weekly_attendance_ts_components)
+
+total_weekly_attendance_ts.SESmodel <- HoltWinters(total_weekly_attendance_ts, beta=FALSE, gamma=FALSE)
+total_weekly_attendance_ts.SESmodel
+plot(total_weekly_attendance_ts.SESmodel)
+predict(total_weekly_attendance_ts.SESmodel,1)
+```
+There is a definite seasonal trend within the week-to-week total attendance figures. There also appears to be a general upward trend for 2000-~2007. Starting in 2007 through 2019, there is a more gradual downward trend of weekly attendance per year. The alpha of the total_weekly_attendance_ts.SESModel is 0.678.  Based on this model, the prediction for the first week of the 2020 season is 2,143,168.
+
+
+## Double Exponential Smoothing of total_weekly_attendance dataset
+```{r}
+total_weekly_attendance_ts.DESmodel <- HoltWinters(total_weekly_attendance_ts, gamma=FALSE)
+total_weekly_attendance_ts.DESmodel
+plot(total_weekly_attendance_ts.DESmodel)
+predict(total_weekly_attendance_ts.DESmodel,1)
+```
+Using the Double Exponential Smoothing model for the total weekly attendance, the alpha value increased to 0.6896. The beta value is 0.0068. Based on the total_weekly_attendance_ts.DESmodel, total attendance for the first week of the 2020 season is 2,148,051. The DES model predicts about 5,000 more fans in attendance than the SES model does.
+
+## Holt-Winters modeling of total_weekly_attendance dataset
+```{r}
+total_weekly_attendance_ts.HWmodel <- HoltWinters(total_weekly_attendance_ts)
+total_weekly_attendance_ts.HWmodel
+plot(total_weekly_attendance_ts.HWmodel)
+predict(total_weekly_attendance_ts.HWmodel, 17)
+
+
+
+```
+Using the Holt-Winters model, the alpha dropped to 0.0196. The beta value increased to 0.1453 and the gamma value is 0.3777.
+
+Determine which of the three models, SES, DES or HW does a better job of predicting NFL Attendance on a week to week basis.
+Based on the caluclation of the MSE and the RMSE, the Holt-Winters model does the best job of predicting future NFL attendance.  The RMSE for HW is 100,406.78 wherease the RMSE for the SES model is 144,586.38 and the DES model is 145,151.74.
+```{r}
+total_weekly_attendance_train_periods <- 255  #15 seasons of 17 games = 255
+total_weekly_attendance_test_periods <- 85   #5 seasons of 17 games = 85
+cycle <- 17
+total_weekly_attendance_ts_training <- ts(total_weekly_attendance_ts[1:total_weekly_attendance_train_periods], start = 2000, freq = cycle)
+
+total_weekly_attendance_ts_training.SESmodel <- HoltWinters(total_weekly_attendance_ts_training, beta=FALSE, gamma=FALSE)
+total_weekly_attendance_ts_training.DESmodel <- HoltWinters(total_weekly_attendance_ts_training, gamma=FALSE)
+total_weekly_attendance_ts_training.HWmodel <- HoltWinters(total_weekly_attendance_ts_training)
+
+total_weekly_attendance_ts.SESmodel <- HoltWinters(total_weekly_attendance_ts, alpha=total_weekly_attendance_ts_training.SESmodel$alpha, beta=FALSE, gamma=FALSE)
+total_weekly_attendance_ts.DESmodel <- HoltWinters(total_weekly_attendance_ts, alpha=total_weekly_attendance_ts_training.DESmodel$alpha, beta=total_weekly_attendance_ts_training.DESmodel$beta, gamma=FALSE)
+total_weekly_attendance_ts.HWmodel <- HoltWinters(total_weekly_attendance_ts, alpha=total_weekly_attendance_ts_training.HWmodel$alpha, beta=total_weekly_attendance_ts_training.HWmodel$beta, gamma=total_weekly_attendance_ts_training.HWmodel$gamma)
+
+weekly.data.start <- total_weekly_attendance_train_periods + 1
+weekly.data.end <- total_weekly_attendance_train_periods + total_weekly_attendance_test_periods
+
+fit.start <- total_weekly_attendance_train_periods # The fitted points for SES start in period 2, so we want to begin 1 row before the test set starting row number
+fit.end <- total_weekly_attendance_train_periods + total_weekly_attendance_test_periods - 1
+SES.MSE <- sum((total_weekly_attendance_ts.SESmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)
+SES.RMSE <- (sum((total_weekly_attendance_ts.SESmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)) ^ 0.5
+
+fit.start <- total_weekly_attendance_train_periods - 1 # The fitted points for DES start in period 3, so we want to begin 2 rows before the test set starting row number
+fit.end <- total_weekly_attendance_train_periods + total_weekly_attendance_test_periods - 2
+DES.MSE <- sum((total_weekly_attendance_ts.DESmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)
+DES.RMSE <- (sum((total_weekly_attendance_ts.DESmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)) ^ 0.5
+
+fit.start <- total_weekly_attendance_train_periods - cycle + 1 # The fitted points in HW skip the first cycle, so we want to begin 1 cycle's worth of rows before the test set starting row number
+fit.end <- total_weekly_attendance_train_periods + total_weekly_attendance_test_periods - cycle
+HW.MSE <- sum((total_weekly_attendance_ts.HWmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)
+HW.RMSE <- (sum((total_weekly_attendance_ts.HWmodel$fitted[fit.start:fit.end] - total_weekly_attendance_ts[weekly.data.start:weekly.data.end])^2) / (total_weekly_attendance_test_periods)) ^ 0.5
+
+cat(paste("SES MSE =",SES.MSE,"\nDES MSE =",DES.MSE,"\nHW MSE =",HW.MSE))
+
+cat(paste("SES RMSE =",SES.RMSE,"\nDES RMSE =",DES.RMSE,"\nHW RMSE =",HW.RMSE))
+
+
+```
+
+
+***
+# Exponential Smoothing Analysis of seasonal NFL-level attenance data
+
+## Single Exponential Smoothing of total season attendance time series data
+```{r}
+total_seasonal_attendance <- attendance_trimmed %>%
+  group_by(season) %>%
+  summarize(total_season_attendance = sum(weekly_attendance[home_game_binary == 1]))
+total_seasonal_attendance
+
+total_seasonal_attendance_ts <- ts(total_seasonal_attendance$total_season_attendance, start = 2000)
+#total_seasonal_attendance_ts_components <-decompose(total_seasonal_attendance_ts) unable to execute function; receive error that there aren't enough periods detected in the data
+plot(total_seasonal_attendance_ts)
+#plot(total_seasonal_attendance_ts_components) unused piece of code due to error above
+
+total_seasonal_attendance_ts.SESModel <- HoltWinters(total_seasonal_attendance_ts, beta = FALSE, gamma = FALSE)
+total_seasonal_attendance_ts.SESModel
+plot(total_seasonal_attendance_ts.SESModel)
+predict(total_seasonal_attendance_ts.SESModel, 1)
+```
+Unable to use decompose function to assess trend and seasonal aspects of the NFL total attendance per season data. Running the HW model for seasonal attendance, the alpha parameter returns a 0.942. Based on the total_seasonal_attendance_ts.SESModel, the 2021 season should have an estimated total attendance of 16,689,089.
+
+Double Exponenial Smoothing Analysis of the season-to-season attendance trend at the aggregate level of the NFL
+```{r}
+total_seasonal_attendance_ts.DESmodel <- HoltWinters(total_seasonal_attendance_ts, gamma=FALSE)
+total_seasonal_attendance_ts.DESmodel
+plot(total_seasonal_attendance_ts.DESmodel)
+predict(total_seasonal_attendance_ts.DESmodel,1)
+```
+The total_seasonal_attendance_ts.DESModel produces an alpha of 0.9814, which is closer to 1 than the SES model. The DES model produces a beta of 0.004424. The DES model predicts that the total attendance for the 2020 season will be 16,638,534, which is about 50,000 few attendees than the SES model predicts.
+
+Holt-Winters Analysis of the season-to-season attendance trend at the aggregate level of the NFL. Upon execution of the HW model, the software produces an error that there are fewer than two periods in the data to assess seasonality. This is due to there only being 20 seasons worth of data, which do not show any seasonality. The lack of seasonality is also confirmed by the execution of the decompose function two chunks above.
+```{r}
+#total_seasonal_attendance_ts.HWmodel <- HoltWinters(total_seasonal_attendance_ts)
+#total_seasonal_attendance_ts.HWmodel
+#plot(total_seasonal_attendance_ts.HWmodel)
+#predict(total_seasonal_attendance_ts.HWmodel, 1)
+
+# look into why it errors out thinking there are fewer than 2 periods
+
+```
+
+
+Determine which model is better for the NFL Seasonal data, the SES or DES. As mentioned above, HW is not applicable due to there being insufficient data to assess seasonality.
+```{r}
+total_seasonal_attendance_train_periods <- 15  #15 seasons of 17 games = 255
+total_seasonal_attendance_test_periods <- 5   #5 seasons of 17 games = 85
+cycle <- 1
+total_seasonal_attendance_ts_training <- ts(total_seasonal_attendance_ts[1:total_seasonal_attendance_train_periods], start = 2000, freq = cycle)
+
+total_seasonal_attendance_ts_training.SESmodel <- HoltWinters(total_seasonal_attendance_ts_training, beta=FALSE, gamma=FALSE)
+total_seasonal_attendance_ts_training.DESmodel <- HoltWinters(total_seasonal_attendance_ts_training, gamma=FALSE)
+
+
+total_seasonal_attendance_ts.SESmodel <- HoltWinters(total_seasonal_attendance_ts, alpha=total_seasonal_attendance_ts_training.SESmodel$alpha, beta=FALSE, gamma=FALSE)
+total_seasonal_attendance_ts.DESmodel <- HoltWinters(total_seasonal_attendance_ts, alpha=total_seasonal_attendance_ts_training.DESmodel$alpha, beta=total_seasonal_attendance_ts_training.DESmodel$beta, gamma=FALSE)
+
+
+seasonal.data.start <- total_seasonal_attendance_train_periods + 1
+seasonal.data.end <- total_seasonal_attendance_train_periods + total_seasonal_attendance_test_periods
+
+fit.start <- total_seasonal_attendance_train_periods # The fitted points for SES start in period 2, so we want to begin 1 row before the test set starting row number
+fit.end <- total_seasonal_attendance_train_periods + total_seasonal_attendance_test_periods - 1
+SES.MSE <- sum((total_seasonal_attendance_ts.SESmodel$fitted[fit.start:fit.end] - total_seasonal_attendance_ts[seasonal.data.start:seasonal.data.end])^2) / (total_seasonal_attendance_test_periods)
+SES.RMSE <- (sum((total_seasonal_attendance_ts.SESmodel$fitted[fit.start:fit.end] - total_seasonal_attendance_ts[seasonal.data.start:seasonal.data.end])^2) / (total_seasonal_attendance_test_periods)) ^ 0.5
+
+fit.start <- total_seasonal_attendance_train_periods - 1 # The fitted points for DES start in period 3, so we want to begin 2 rows before the test set starting row number
+fit.end <- total_seasonal_attendance_train_periods + total_seasonal_attendance_test_periods - 2
+DES.MSE <- sum((total_seasonal_attendance_ts.DESmodel$fitted[fit.start:fit.end] - total_seasonal_attendance_ts[seasonal.data.start:seasonal.data.end])^2) / (total_seasonal_attendance_test_periods)
+DES.RMSE <- (sum((total_seasonal_attendance_ts.DESmodel$fitted[fit.start:fit.end] - total_seasonal_attendance_ts[seasonal.data.start:seasonal.data.end])^2) / (total_seasonal_attendance_test_periods)) ^ 0.5
+
+
+
+cat(paste("SES MSE =",SES.MSE,"\nDES MSE =",DES.MSE))
+
+cat(paste("SES RMSE =",SES.RMSE,"\nDES RMSE =",DES.RMSE))
+
+
+
+
+
+```
+
+
+
+***
+## Regression Analysis
+
+```{r}
+
+division_attendance_lm_set <- division_attendance_clean %>%
+  arrange(team_name, season, week) %>%
+  rename(nfc_east = 'NFC East',
+         nfc_central = 'NFC Central',
+         nfc_north = 'NFC North',
+         nfc_south = 'NFC South',
+         nfc_west = 'NFC West',
+         afc_east = 'AFC East',
+         afc_central = 'AFC Central',
+         afc_north = 'AFC North',
+         afc_south = 'AFC South',
+         afc_west = 'AFC West',
+         nfc = 'NFC',
+         afc = 'AFC') %>%
+  filter(home_game_binary == 1) %>%
+  filter(bye_week_binary == 0) %>%
+  filter(neutral_site_binary == 0) %>%
+  select(-home_game_binary, -bye_week_binary, -neutral_site_binary, -stadium_capacity) %>%
+  mutate(team_name = as.factor(team_name))
+division_attendance_lm_set
+
+division_attendance.MLRmodel <- lm(weekly_attendance ~ .-team_name, data = division_attendance_lm_set)
+summary(division_attendance.MLRmodel)
+plot(division_attendance.MLRmodel)
+
+division_attendance.MLRmodelrefined <- lm(weekly_attendance ~ game_win + game_loss + game_tie + points_scored + nfc_east + nfc_central + nfc_south + nfc_west + afc_east, data = division_attendance_lm_set)
+summary(division_attendance.MLRmodelrefined)
+plot(division_attendance.MLRmodelrefined)
+
+
+
+
+standings_trimmed
+
+standings.MLRmodel <- lm(true_total_home_attendance ~ season_win_pct, data = standings_trimmed)
+summary(standings.MLRmodel)
+
+
+
+
+
+```
+
+
+
+***
+# K-Nearest Neighbor Analysis
+## K-Nearest Neighbor for Prediction Analysis
+
+At present, we do not have a 2020 attendance dataset to use for prediction. Based on the algorithm for finding the best value of K for the nearest neighbors with the lowest RMSE is 5 with an RMSE of 94,102.66.
+```{r}
+
+total_weekly_attendance.knndf <- attendance_trimmed %>%
+  select(season, week, weekly_attendance, stadium_capacity) %>%
+  group_by(season, week) %>%
+  summarize(total_weekly_attendance = sum(weekly_attendance),
+            weekly_fill_rate = 100 * (sum(weekly_attendance)/sum(stadium_capacity)))
+
+
+total_weekly_attendance.knndf <- total_weekly_attendance.knndf %>%
+  as.data.frame(total_weekly_attendance.knndf)
+
+set.seed(12345)
+
+total_weekly_attendance.knndf.trainingset <- sample(1:nrow(total_weekly_attendance.knndf), 0.6*nrow(total_weekly_attendance.knndf))
+
+total_weekly_attendance.knndf.training <- total_weekly_attendance.knndf[total_weekly_attendance.knndf.trainingset,-3]
+total_weekly_attendance.knndf.training.results <- total_weekly_attendance.knndf[total_weekly_attendance.knndf.trainingset, 3]
+
+total_weekly_attendance.knndf.test <- total_weekly_attendance.knndf[-total_weekly_attendance.knndf.trainingset,-3]
+total_weekly_attendance.knndf.test.results <- total_weekly_attendance.knndf[-total_weekly_attendance.knndf.trainingset,3]
+
+total_weekly_attendance.knndf.knn <- knn.reg(total_weekly_attendance.knndf.training, total_weekly_attendance.knndf.test, total_weekly_attendance.knndf.training.results, k=5)
+
+(mean((total_weekly_attendance.knndf.knn$pred - total_weekly_attendance.knndf.test.results)^2))^0.5
+
+best.k <- -1
+RMSE <- -1
+best.RMSE <- 99999999
+for (i in 1:50) {
+  total_weekly_attendance.knndf.knn <- knn.reg(total_weekly_attendance.knndf.training, total_weekly_attendance.knndf.test, total_weekly_attendance.knndf.training.results, k=i)
+  RMSE <- (mean((total_weekly_attendance.knndf.knn$pred - total_weekly_attendance.knndf.test.results)^2))^0.5
+  if (RMSE < best.RMSE) {
+    best.k <- i
+    best.RMSE <- RMSE
+  }
+}
+print(paste("The optimal value of k is",best.k,"with a RMSE of",best.RMSE))
+
+```
+
+
+
+***
+## K-Nearest Neighbor for Classification Analysis
+
+
+figure out how to convert into a binary setup
+```{r}
+total_weekly_attendance.knndf.class <- attendance_trimmed %>%
+  select(season, week, weekly_attendance, stadium_capacity) %>%
+  group_by(season, week) %>%
+  summarize(total_weekly_attendance = sum(weekly_attendance),
+            weekly_fill_rate = 100 * (sum(weekly_attendance)/sum(stadium_capacity)))
+
+total_weekly_attendance.knndf.class <- total_weekly_attendance.knndf.class %>%
+  as.data.frame(total_weekly_attendance.knndf.class)
+
+set.seed(12345)
+
+total_weekly_attendance.knndf.class.trainingset <- sample(1:nrow(total_weekly_attendance.knndf.class), 0.6*nrow(total_weekly_attendance.knndf.class))
+
+total_weekly_attendance.knndf.class.training <- total_weekly_attendance.knndf.class[total_weekly_attendance.knndf.class.trainingset,-3]
+total_weekly_attendance.knndf.class.training.results <- total_weekly_attendance.knndf.class[total_weekly_attendance.knndf.class.trainingset, 3]
+
+total_weekly_attendance.knndf.class.test <- total_weekly_attendance.knndf.class[-total_weekly_attendance.knndf.class.trainingset,-3]
+total_weekly_attendance.knndf.classtest.results <- total_weekly_attendance.knndf.class[-total_weekly_attendance.knndf.class.trainingset,3]
+
+
+
+
+
+```
+
+
+***
+## Ensemble Trees Analysis
+
+```{r}
+
+attendance_trimmed_trees.df <- attendance_trimmed %>%
+  as.data.frame(attendance_trimmed)
+
+set.seed(12345)
+
+attendance_trimmed_trees.df.trainingset <- sample(1:nrow(attendance_trimmed_trees.df), 0.6 * nrow(attendance_trimmed_trees.df))
+
+nvars <- ncol(attendance_trimmed_trees.df)
+
+attendance_trimmed_trees.df.training <-attendance_trimmed_trees.df[attendance_trimmed_trees.df.trainingset, -nvars]
+attendance_trimmed_trees.df.training.results <-attendance_trimmed_trees.df[attendance_trimmed_trees.df.trainingset, nvars]
+
+attendance_trimmed_trees.df.test <-attendance_trimmed_trees.df[attendance_trimmed_trees.df.trainingset, -nvars]
+attendance_trimmed_trees.df.test.results <-attendance_trimmed_trees.df[attendance_trimmed_trees.df.trainingset, nvars]
+
+
+# Bagging Procedure
+bag.proportion <- 0.3
+bag.numtrees <- 25
+bag.mindev <- 0.005
+
+bag.trees <- vector(mode = "list", length = bag.numtrees)
+bag.predictions <- vector(mode = "list", length = bag.numtrees)
+bagged.predictions <- 0
+
+for (i in 1:bag.numtrees){
+  set.seed(12345+i) #if we used 12345 every time, we wouldn't get different samples from the training set
+  attendance_trimmed_trees.df.subset <- attendance_trimmed_trees.df[sample(training,bag.proportion*length(training)),] #selects a random subset of the training set
+  bag.trees[[i]] <- tree(weekly_attendance ~ week + home_game_binary + game_win + game_loss + game_tie + stadium_capacity + pct_filled + points_scored + yards_gained + turnovers_lost, data=attendance_trimmed_trees.df.subset, mindev=bag.mindev)
+  bag.predictions[[i]] <- predict(bag.trees[[i]],attendance_trimmed_trees.df)[-attendance_trimmed_trees.df.trainingset]
+  bagged.predictions <- bagged.predictions + bag.predictions[[i]] #Keeps a running total of the predictions of the test set
+}
+bagged.predictions = bagged.predictions / bag.numtrees #divides the totals by the # of trees to get the average predictions for the test set
+(mean((attendance_trimmed_trees.df.test.results-bagged.predictions)^2))^0.5 #computes RMSE
+
+
+# Random Tree Procedure
+rt.vars <- 5
+rt.numtrees <- 25
+rt.mindev <- 0.005
+
+rt.trees <-vector(mode = "list", length = rt.numtrees)
+rt.predictions <- vector(mode = "list", length = rt.numtrees)
+randomtree.predictions <- 0
+
+for (i in 1:rt.numtrees){
+  set.seed(12345+i) #if we used 12345 every time, we wouldn't get different subsets of variables
+  attendance_trimmed_trees.df.subset <- attendance_trimmed_trees.df[attendance_trimmed_trees.df.trainingset,sample(1:(nvars-1),rt.vars)] #selects a random subset of the variables
+  attendance_trimmed_trees.df.subset[,rt.vars+1] <- attendance_trimmed_trees.df.training.results
+  names(attendance_trimmed_trees.df.subset)[rt.vars+1] = "weekly_attendance" #this is necessary for the predict function to be able to match variables correctly
+  rt.trees[[i]] <- tree(weekly_attendance ~ ., data=attendance_trimmed_trees.df.subset, mindev=rt.mindev) #include as many independent variables as are being used
+  rt.predictions[[i]] <- predict(rt.trees[[i]],attendance_trimmed_trees.df)[-training]
+  randomtree.predictions <- randomtree.predictions + rt.predictions[[i]] #Keeps a running total of the predictions of the test set
+}
+randomtree.predictions = randomtree.predictions / rt.numtrees #divides the totals by the # of trees to get the average predictions for the test set
+(mean((attendance_trimmed_trees.df.test.results-randomtree.predictions)^2))^0.5 #computes RMSE
+
+
+
+```
+
+
+***
+## Classification Tree Analysis
+Data is not a table of binary values. Weekly attendance is a continuous number and not a binary, 1 or 0, so classification trees would not be applicable.
+
+```{r}
+
+```
+
+
+***
+## Logistic Regression Analysis
+
+weekly attendance is not a binomial data type and therefore the model is not applicable to this analysis
+
+```{r}
+division_attendance_glm_set <- division_attendance_lm_set %>%
+  select(-team_name) %>%
+  as.data.frame(division_attendance_lm_set)
+division_attendance_glm_set
+
+set.seed(12345)
+
+division_attendance_glm_trainingset <- sample(1:nrow(division_attendance_glm_set), 0.6*nrow(division_attendance_glm_set))
+
+
+division_attendance_glm_training <- division_attendance_glm_set[division_attendance_glm_trainingset,-3]
+division_attendance_glm_training.results <- division_attendance_glm_set[division_attendance_glm_trainingset,3]
+
+division_attendance_glm_test = division_attendance_glm_set[-division_attendance_glm_trainingset,-3]
+division_attendance_glm_test.results = division_attendance_glm_set[-division_attendance_glm_trainingset,3]
+
+division_attendance_glm_lr <- glm(weekly_attendance ~., family=binomial(link='logit'),data=division_attendance_glm_set[division_attendance_glm_trainingset,])
+
+summary(division_attendance_glm_lr)
+
+division_attendanc_glm_test.probabilities <- predict(division_attendance_glm_lr, division_attendance_glm_test, type = "response")
+
+division_attendance_glm_lr.classifications <- round(division_attendanc_glm_test.probabilities, 0)
+
+sum(division_attendance_glm_lr.classifications == division_attendance_glm_test.results$weekly_attendance) / length(division_attendance_glm_test.results$weekly_attendance)
+
+table(division_attendance_glm_lr.classifications, division_attendance_glm_test.results$weekly_attendance)
+
+
+```
+
+
+
+
+
+***
+# Prescriptive Analytics
+## Expected Value Analysis
+
+```{r}
+
+```
+
+
+***
+# Decision Tree Analysis
+
+```{r}
+
+```
+
+
+***
+## Sensitivity Analysis
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
